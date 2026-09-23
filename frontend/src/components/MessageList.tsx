@@ -1,5 +1,5 @@
 import type { ChatMessage } from "../types/chat";
-import RetrievalDebugPanel from "./RetrievalDebugPanel";
+import DebugPanel from "./DebugPanel";
 import SourceList from "./SourceList";
 
 interface Props {
@@ -20,7 +20,7 @@ export default function MessageList({ messages }: Props) {
           <span className="message__role">{m.role === "user" ? "You" : "Assistant"}</span>
           <p>{m.content}</p>
           {m.sources && m.sources.length > 0 && <SourceList sources={m.sources} />}
-          {m.debug && <RetrievalDebugPanel debug={m.debug} />}
+          {m.debug && <DebugPanel debug={m.debug} />}
         </li>
       ))}
     </ul>

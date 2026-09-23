@@ -4,10 +4,12 @@ A portfolio project that will become a SaaS-style RAG chatbot where every user h
 The goal is to make **LLM cost and context management visible**. It will track input/output/total tokens,
 per-request cost, remaining credits, conversation context, topic switches, RAG retrieval and context compression.
 
-> **Status: Step 4, RAG.** Every chat question is answered from a Wikipedia-based knowledge base in
-> Qdrant (Step 3), with source attribution. Actual LLM token usage is metered into cost and credits
-> (Step 2). Questions outside the knowledge base get a controlled answer without an LLM call.
-> No LangGraph, conversation memory, auth, Redis or streaming yet.
+> **Status: Step 5, LangGraph orchestration.** Each chat turn runs through a small, deterministic
+> LangGraph workflow: analyze → credit precheck → retrieve (Qdrant) → build context → credit check →
+> generate (OpenAI) → usage accounting. It has explicit branches for no relevant knowledge and
+> insufficient credits. Answers are grounded in the Wikipedia knowledge base with source attribution,
+> and actual token usage is metered into cost and credits. No conversation memory, topic switching,
+> context compression, auth, Redis or streaming yet.
 
 ## Repository layout
 
@@ -23,9 +25,10 @@ backend/            FastAPI service (Python 3.11+)
       pricing.py    Model price catalog + cost calculation
       credits.py    USD -> credits conversion policy
       usage_service.py  Usage ledger + credit balance
-      chat_service.py   Chat use case: credit check -> RAG -> metering -> response
+      chat_service.py   Invokes the compiled chat graph, maps final state -> response
       metering.py       UsageMeter: affordability check + pricing/credits/ledger of actual usage
-    rag/            RAGService, RAGContextBuilder (prompt), source deduplication
+    graph/          LangGraph chat workflow: state, runtime context, nodes/routing, builder
+    rag/            RAGContextBuilder (prompt), source deduplication
     knowledge/      Document/Chunk models, EmbeddingProvider (OpenAI), VectorStore (Qdrant), Retriever
   migrations/       Alembic migrations
   tests/            pytest (no real OpenAI calls)
@@ -38,11 +41,23 @@ docs/               Architecture docs
 ## Architecture (current)
 
 ```
-React ──► FastAPI (/api/v1/chat) ──► ChatService ──► RAGService ──┬─► Retriever ──► Qdrant
-                                          │                        ├─► RAGContextBuilder
-                                          │                        └─► LLMProvider ──► OpenAI
-                                          ▼
-          LLM usage ──► UsageMeter ──► PricingService ──► CreditPolicy ──► UsageService ──► Database
+React ──► FastAPI (/api/v1/chat) ──► ChatService ──► LangGraph chat_graph
+                                                        |
+      analyze_question ──(empty)──────────────────────► END (422)
+            ↓
+      precheck_credits ──(no credits)─────────────────► END (402)
+            ↓
+      retrieve_knowledge   (Retriever → Qdrant) ──(nothing relevant)──► no_knowledge ──► END
+            ↓
+      build_context        (RAGContextBuilder)
+            ↓
+      check_credits ─────(prompt too expensive)───────► END (402)
+            ↓
+      generate_answer      (LLMProvider → OpenAI)
+            ↓
+      usage_accounting     (UsageMeter → PricingService → CreditPolicy → UsageService → DB)
+            ↓
+           END
 ```
 
 Knowledge base ingestion:
@@ -73,15 +88,17 @@ distinction between tokens, cost and credits.
 - A request is rejected with **402** before the LLM is called if the worst-case cost exceeds the remaining credits.
 - Credits are deducted only after a successful LLM call.
 - Errors are returned as clean JSON: `{"error": {"code", "message"}}`. No secrets or raw provider errors.
-- Structured `chat_request` log per turn: request ID, retrieval latency, chunks, top score, LLM latency,
-  tokens, cost, credits and outcome. Prompts and user content are not logged. Every response carries `X-Request-ID`.
+- Structured logs per turn: one `graph_node` event per node (duration, outcome, metrics) and a
+  `chat_graph_end` summary (graph path, retrieval/LLM latency, tokens, cost, credits, outcome), all
+  tagged with the request ID. Prompts and user content are not logged. Every response carries `X-Request-ID`.
 - UI shows credits remaining, total tokens and the last request's cost (top right).
 - Knowledge base: 14 curated Wikipedia articles (software engineering / interview prep), 336 chunks,
   `text-embedding-3-small` (1536 dims) in Qdrant collection `interview_knowledge`. Ingestion is
   idempotent; unchanged articles are skipped without embedding calls.
 - Dev knowledge search UI at `http://localhost:5173/#/dev/knowledge` (dev builds only).
 - **RAG chat**: top-5 chunks above a 0.30 similarity threshold are sent to the LLM as numbered sources.
-  Answers show clickable source links. `RAG_DEBUG=true` adds a "Retrieved context" panel with similarity scores.
+  Answers show clickable source links. `RAG_DEBUG=true` adds a debug panel with the graph path,
+  latencies and retrieved chunks with similarity scores.
 
 Example chat response (real run, "How does a Kafka consumer group work?"):
 
@@ -198,6 +215,7 @@ docker compose up --build         # qdrant :6333, backend :8000, frontend :8080
 | 2 | Real LLM provider, token usage, pricing, credits, usage ledger **(done)** |
 | 3 | Wikipedia ingestion, embeddings abstraction, Qdrant, standalone retrieval **(done)** |
 | 4 | RAG in chat: grounded answers, sources, no-context handling, metering of context tokens **(done)** |
-| 5 | LangGraph orchestration, conversation history, context management: topic switching, compression |
-| 6 | Auth, Redis caching/distributed state, streaming |
-| 7 | AWS deployment: ECS/Fargate, ALB, WAF, RDS |
+| 5 | LangGraph orchestration of the chat turn (deterministic graph, explicit routing) **(done)** |
+| 6 | Conversation history and context management: topic switching, summarisation, compression |
+| 7 | Auth, Redis caching/distributed state, streaming |
+| 8 | AWS deployment: ECS/Fargate, ALB, WAF, RDS |

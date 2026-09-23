@@ -173,3 +173,37 @@ def test_response_carries_request_id(client):
 
     assert response.headers["x-request-id"] == "abc-123"
     assert len(client.get("/api/v1/health").headers["x-request-id"]) == 32  # generated
+
+
+def test_blank_question_returns_clean_422(client, provider, retriever):
+    response = client.post("/api/v1/chat", json={"conversation_id": "c1", "message": "   "})
+
+    assert response.status_code == 422
+    assert response.json() == {"error": {"code": "invalid_question", "message": "The question is empty."}}
+    assert retriever.calls == [] and provider.calls == []
+
+
+def test_debug_mode_exposes_graph_path(client, settings):
+    settings.rag_debug = True
+
+    debug = client.post("/api/v1/chat", json=QUESTION).json()["debug"]
+
+    assert debug["graph_path"] == [
+        "analyze_question",
+        "precheck_credits",
+        "retrieve_knowledge",
+        "build_context",
+        "check_credits",
+        "generate_answer",
+        "usage_accounting",
+    ]
+    assert debug["llm_latency_ms"] is not None
+
+
+def test_graph_state_is_not_exposed_without_debug(client):
+    body = client.post("/api/v1/chat", json=QUESTION).json()
+
+    assert body["debug"] is None
+    assert set(body) == {
+        "conversation_id", "assistant_message", "answer_type", "model", "sources", "usage", "cost", "credits", "debug",
+    }

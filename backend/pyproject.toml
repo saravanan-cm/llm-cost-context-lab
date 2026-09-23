@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "llm-cost-context-lab-backend"
-version = "0.3.0"
+version = "0.5.0"
 description = "Backend API for LLM Cost & Context Lab"
 requires-python = ">=3.11"
 dependencies = [
@@ -15,6 +15,7 @@ dependencies = [
     "sqlalchemy>=2.0.36",
     "alembic>=1.14",
     "qdrant-client>=1.12",
+    "langgraph>=1.2,<2",
 ]
 
 [project.optional-dependencies]

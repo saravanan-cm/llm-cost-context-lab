@@ -5,3 +5,4 @@ openai>=1.66
 sqlalchemy>=2.0.36
 alembic>=1.14
 qdrant-client>=1.12
+langgraph>=1.2,<2

@@ -49,10 +49,15 @@ class RetrievedChunkDebug(BaseModel):
     """False when the chunk fell below the relevance threshold."""
 
 
-class RetrievalDebug(BaseModel):
+class ChatDebug(BaseModel):
+    """Development-only execution details (RAG_DEBUG=true)."""
+
+    graph_path: list[str]
+    """LangGraph nodes executed, in order."""
     top_k: int
     min_relevance_score: float | None
     retrieval_latency_ms: int | None
+    llm_latency_ms: int | None
     query_tokens: int
     chunks: list[RetrievedChunkDebug]
 
@@ -69,5 +74,5 @@ class ChatResponse(BaseModel):
     usage: TokenUsage
     cost: CostBreakdown
     credits: CreditInfo
-    debug: RetrievalDebug | None = None
+    debug: ChatDebug | None = None
     """Only populated when RAG_DEBUG=true."""

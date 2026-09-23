@@ -51,6 +51,12 @@ class PricingNotConfiguredError(AppError):
     default_message = "Pricing is not configured for the selected model."
 
 
+class InvalidQuestionError(AppError):
+    status_code = 422
+    code = "invalid_question"
+    default_message = "The question is empty."
+
+
 class InsufficientCreditsError(AppError):
     status_code = 402
     code = "insufficient_credits"

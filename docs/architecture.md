@@ -3,100 +3,147 @@
 This document describes the current system and the **target** architecture. Components marked
 **NOT IMPLEMENTED** are shown to guide later steps.
 
-## Request flow: RAG chat (implemented, Step 4)
-
-> LangGraph, conversation history, topic switching and context compression/summarisation are
-> **future steps**. Each chat turn is answered independently from the knowledge base.
+## Request flow: LangGraph chat workflow (implemented, Step 5)
 
 ```
-              User Question
-                   |
-                   v
-              FastAPI API                 routes/chat.py: HTTP only
-                   |
-                   v
-              ChatService                 sequencing, logging, response shaping
-                   |
-                   v
-               RAG Service                app/rag/service.py
-                /       \
-               /         \
-         Retriever       LLM Provider
-            |              |
-            v              v
-         Qdrant          OpenAI
-            |
-      Relevant Chunks     (top-k, filtered by RAG_MIN_RELEVANCE_SCORE)
-            |
-            +------→ Context Builder      app/rag/context_builder.py
-                          |
-                          ↓
-                         LLM
-                          |
-                          ↓
-                     Answer + Sources     (deduplicated per article)
-                          |
-                          ↓
-                   Usage / Cost / Credits  UsageMeter → PricingService → CreditPolicy → UsageService
+React
+  ↓
+FastAPI                  routes/chat.py: validation, user placeholder, HTTP mapping
+  ↓
+ChatService              invokes the compiled graph, maps final state → response / errors
+  ↓
+LangGraph (chat_graph)   orchestration only
+  |
+  +--> Analyze Question        normalise; empty → END (422)
+  |
+  +--> Precheck Credits        cheap check on the question; insufficient → END (402)
+  |
+  +--> Retrieve Knowledge      KnowledgeRetriever
+  |        ↓
+  |      Qdrant
+  |        └── no relevant chunks → No Knowledge → END (controlled answer, no LLM, no charge)
+  |
+  +--> Build Context           RAGContextBuilder (numbered sources + grounding instructions)
+  |
+  +--> Check Credits           accurate check on the full prompt; insufficient → END (402)
+  |
+  +--> Generate Answer         LLMProvider
+  |        ↓
+  |      OpenAI
+  |
+  +--> Usage Accounting        UsageMeter
+  ↓
+Cost / Credits           PricingService → CreditPolicy
+  ↓
+Database                 UsageService (ledger row + deduction, one transaction)
 ```
 
-### `POST /chat` sequence
+### Graph definition (`app/graph/builder.py`)
 
-1. **Early credit check** on the bare question. A user with no credits is rejected with **402**
-   before any retrieval or embedding spend. An unpriced model also fails here.
-2. **Retrieve** (`RAGService.prepare`). The question is embedded and the top `RAG_TOP_K` chunks are
-   fetched from Qdrant. Chunks below `RAG_MIN_RELEVANCE_SCORE` are dropped. If Qdrant or embeddings
-   fail, the request returns 503/502 and **no LLM call or charge happens**.
-3. **No relevant chunks.** With `RAG_NO_CONTEXT_MODE=fixed_response` (default), the request returns
-   a controlled "the knowledge base doesn't cover this" answer: `answer_type: "no_context"`, no LLM
-   call, zero cost and no ledger row. With `llm`, the LLM answers under instructions to say up front
-   that the knowledge base lacks the topic.
-4. **Build the prompt** (`RAGContextBuilder`). Grounding instructions go in the system instructions.
-   Numbered source blocks (one per article, chunks in reading order, with title, source and URL)
-   are wrapped in `<knowledge_context>`, followed by the question.
-5. **Accurate credit check** on the full prompt (instructions + context + question) plus
-   `LLM_MAX_OUTPUT_TOKENS`, before the LLM call.
-6. **LLM call** (`RAGService.generate`). Failures map to typed errors, and **no credits are
-   deducted**.
-7. **Metering** (`UsageMeter.record`) on **provider-reported** tokens. Retrieved context,
-   instructions and the question are all in the input tokens the provider reports, so cost and
-   credits reflect the real prompt size. The ledger row is written and credits are deducted in one
-   transaction.
-8. **Response**: `assistant_message`, `answer_type`, `model`, `sources[]` (title, source, url, best
-   score), `usage`, `cost`, `credits`, and `debug` (retrieved chunks with scores and used/filtered
-   flags) only when `RAG_DEBUG=true`.
+```mermaid
+graph TD;
+  __start__ --> analyze_question;
+  analyze_question -. empty question .-> __end__;
+  analyze_question --> precheck_credits;
+  precheck_credits -. insufficient .-> __end__;
+  precheck_credits -. RAG enabled .-> retrieve_knowledge;
+  precheck_credits -. RAG disabled .-> build_context;
+  retrieve_knowledge -. no relevant docs .-> no_knowledge;
+  retrieve_knowledge -. relevant docs .-> build_context;
+  no_knowledge --> __end__;
+  build_context --> check_credits;
+  check_credits -. insufficient .-> __end__;
+  check_credits -. sufficient .-> generate_answer;
+  generate_answer --> usage_accounting;
+  usage_accounting --> __end__;
+```
 
-With `RAG_ENABLED=false`, chat falls back to the Step 2 behaviour: `answer_type: "direct"`, the
-question is sent as-is with `SYSTEM_PROMPT`, and there is no retrieval.
+| Node | Uses (existing service) | Writes to state |
+|------|--------------------------|-----------------|
+| `analyze_question` | none (no LLM call) | `question`, `retrieval_query`, `use_retrieval`, `answer_type`, or `status=invalid_question` |
+| `precheck_credits` | `UsageMeter.ensure_can_afford` on the bare question | `status=insufficient_credits` if it fails |
+| `retrieve_knowledge` | `KnowledgeRetriever.search` (top-k), then the relevance threshold | `retrieved_documents`, `relevant_documents`, `retrieval_latency_ms`, `query_tokens`, `status=no_knowledge` |
+| `no_knowledge` | `UsageMeter.remaining_credits` | controlled `assistant_message`, zero usage/cost |
+| `build_context` | `group_by_document`, `RAGContextBuilder` | `context` (instructions + input), `sources` |
+| `check_credits` | `UsageMeter.ensure_can_afford` on the full prompt | `status=insufficient_credits` if it fails |
+| `generate_answer` | `LLMProvider.generate` | `assistant_message`, `model`, `usage` (provider-reported), `llm_latency_ms` |
+| `usage_accounting` | `UsageMeter.record` → PricingService → CreditPolicy → UsageService | `cost`, `credits_consumed`, `credits_remaining`, `status=answered` |
+
+Every node appends its name to `graph_path` (a reducer-backed list), so the path taken is part of
+the state.
+
+**State vs context.** `ChatState` (`app/graph/state.py`, a `TypedDict`) holds only data flowing
+through the workflow. Services (retriever, context builder, LLM provider, usage meter with its
+request-scoped DB session) and settings are passed per invocation through LangGraph's runtime
+context (`context_schema=ChatGraphContext`, read by nodes via `runtime.context`). The graph is
+compiled **once** (`get_chat_graph()`, cached) and shared across requests.
+
+**Expected outcomes vs failures.**
+- Empty question, no relevant knowledge and insufficient credits are expected outcomes. They set
+  `status` and are routed explicitly to `END`. `ChatService` turns `invalid_question` into 422 and
+  `insufficient_credits` into 402.
+- Infrastructure failures raise the existing typed `AppError`s from inside a node: Qdrant down or
+  collection missing (503), embedding errors (502/503), LLM timeout (504), provider error (502).
+  Database errors in `usage_accounting` raise `SQLAlchemyError` and map to 503. An exception stops
+  the graph, so no later node runs: **an LLM failure never reaches `usage_accounting`, and no
+  credits are deducted**. The API error handlers produce `{"error": {code, message}}`, and raw
+  provider errors never reach the client.
+
+`RAG_ENABLED=false` routes `precheck_credits → build_context` (direct prompt, no retrieval).
+`RAG_NO_CONTEXT_MODE=llm` routes "no relevant docs" to `build_context` with the no-context prompt
+instead of the `no_knowledge` node.
+
+### Why LangGraph
+
+The Step 4 `RAGService` did the same work in straight-line code. It was replaced (not wrapped)
+by the graph because:
+
+- **Explicit state.** Everything a turn knows (question, retrieved chunks, context, usage, cost) is
+  a typed state object, not locals scattered across services.
+- **Deterministic workflow.** Fixed nodes and edges; no LLM decides the control flow.
+- **Conditional routing.** Branches such as "no relevant knowledge", "insufficient credits" and
+  "RAG disabled" are visible edges rather than early returns buried in a method.
+- **Extensibility.** Upcoming features map onto nodes and edges: topic detection (a node after
+  `analyze_question`), context switching and summarisation/compression (nodes before
+  `build_context`), retrieval decisions (routing before `retrieve_knowledge`), and token-budget
+  decisions (the credit-check nodes).
+- **Observability.** Per-node timing and outcome logs plus the recorded `graph_path` make a
+  multi-step LLM turn easy to follow.
+
+LangGraph provides **only orchestration**. Retrieval (Retriever + Qdrant), LLM inference
+(LLMProvider + OpenAI), prompt construction (RAGContextBuilder) and token/cost/credit accounting
+(UsageMeter, PricingService, CreditPolicy, UsageService) remain our own services, unchanged.
+LangGraph is used without LangChain models, retrievers or prompts. `langchain-core` is installed
+only as a transitive dependency of `langgraph`.
 
 ### RAG configuration
 
 | Variable | Default | Notes |
 |----------|---------|-------|
-| `RAG_ENABLED` | `true` | `false` means direct LLM chat |
+| `RAG_ENABLED` | `true` | `false` means direct LLM chat (graph skips retrieval) |
 | `RAG_TOP_K` | `5` | Chunks retrieved per question (1 to 20) |
-| `RAG_MIN_RELEVANCE_SCORE` | `0.30` | Cosine similarity; blank disables filtering. Calibrated for `text-embedding-3-small` on this knowledge base: 13 in-domain questions scored 0.31–0.76 top-1, and 10 out-of-domain questions (quantum mechanics, Roman Empire, ...) scored at most 0.27. **Re-calibrate if the embedding model or corpus changes.** |
+| `RAG_MIN_RELEVANCE_SCORE` | `0.30` | Cosine similarity; blank disables filtering. Calibrated for `text-embedding-3-small` on this knowledge base: 13 in-domain questions scored 0.31–0.76 top-1, and 10 out-of-domain questions scored at most 0.27. **Re-calibrate if the embedding model or corpus changes.** |
 | `RAG_NO_CONTEXT_MODE` | `fixed_response` | or `llm` |
-| `RAG_NO_CONTEXT_MESSAGE` | (text) | Reply used by `fixed_response` |
-| `RAG_DEBUG` | `false` | Adds retrieval details to chat responses and the UI |
-
-The env names are prefixed `RAG_` (rather than bare `TOP_K`) to avoid clashing with the ingestion
-and knowledge-search settings.
+| `RAG_NO_CONTEXT_MESSAGE` | (text) | Reply used by the `no_knowledge` node |
+| `RAG_DEBUG` | `false` | Adds graph path, latencies and retrieved chunks to chat responses and the UI |
 
 ### Module responsibilities
 
 | Module | Responsibility |
 |--------|---------------|
 | `api/v1/routes/*` | HTTP only |
-| `api/deps.py` | Builds services from settings. `get_current_user_id` is the future auth seam (returns `dev-user`). |
+| `api/deps.py` | Builds services and the per-request `ChatGraphContext`. `get_current_user_id` is the future auth seam (returns `dev-user`). |
 | `api/errors.py` | `AppError`, `SQLAlchemyError` and unexpected errors to `{"error": {code, message}}` |
-| `services/chat_service.py` | Sequences credit check → RAG → metering. Logs `chat_request` and builds the response. No retrieval, prompt, pricing or SQL logic. |
-| `rag/service.py` | `RAGService`: retrieve → relevance filter → no-context policy → prompt → LLM |
-| `rag/context_builder.py` | `RAGContextBuilder`: the only place RAG prompt text lives |
+| `services/chat_service.py` | Invokes the compiled graph, logs start/end, maps final state to response or errors |
+| `graph/state.py` | `ChatState` TypedDict (data only) |
+| `graph/context.py` | `ChatGraphContext` (services) and `ChatGraphSettings` (per-request runtime context) |
+| `graph/nodes.py` | Node functions and routing functions (orchestration only) |
+| `graph/builder.py` | `create_chat_graph()` / cached `get_chat_graph()` |
+| `rag/context_builder.py` | `RAGContextBuilder`: the only place prompt text lives |
 | `rag/sources.py` | Deduplicates chunks into one `SourceReference` per article |
 | `knowledge/retriever.py` | Retrieval only (Step 3, unchanged) |
-| `services/llm/` | `LLMProvider` Protocol (now with an optional `instructions` override), `OpenAIProvider`, mock |
-| `services/metering.py` | `UsageMeter`: pre-flight affordability check and metering of actual usage |
+| `services/llm/` | `LLMProvider` Protocol, `OpenAIProvider`, mock |
+| `services/metering.py` | `UsageMeter`: affordability check and metering of actual usage |
 | `services/pricing.py` | `MODEL_PRICING` catalog and `PricingService` |
 | `services/credits.py` | `CreditPolicy` (USD to credits) |
 | `services/usage_service.py` | Ledger writes, balance checks, usage summary |
@@ -156,6 +203,8 @@ Migrations are managed by Alembic (`backend/migrations`).
   always charged.
 - Only the current question (plus retrieved context) is sent to the LLM. There is no conversation
   history yet, so follow-up questions like "and how does it scale?" are not resolved.
+- The graph runs synchronously in FastAPI's threadpool (`graph.stream`, sync nodes). There is no
+  checkpointer: graph state lives only for one request, and nothing is persisted between turns.
 - The query-embedding cost of retrieval (about 10 tokens, roughly $0.0000002) is logged but not
   charged to user credits. Only LLM usage is metered.
 - Chunks overlap by up to 200 characters, so adjacent chunks of one article can repeat a little text
@@ -167,18 +216,15 @@ Migrations are managed by Alembic (`backend/migrations`).
 
 Every request gets an `X-Request-ID` (a well-formed incoming one is reused, otherwise one is
 generated). It is echoed in the response header and attached as `request_id` to every log line
-written while handling the request.
+written while handling the request, including every graph node.
 
-Each chat turn logs one `chat_request` event:
+Per chat turn:
 
-| Field | Meaning |
-|-------|---------|
-| `outcome` | `success`, `no_context` or `failure` (+ `stage`: `credit_check`, `retrieval`, `llm`, `metering`; + `error_code`) |
-| `conversation_id`, `request_id` | Correlation |
-| `rag`, `retrieval_latency_ms`, `chunks_retrieved`, `chunks_used`, `sources`, `top_score` | Retrieval quality and latency |
-| `model`, `provider_request_id`, `llm_latency_ms` | LLM call |
-| `input_tokens`, `output_tokens`, `total_tokens`, `total_cost_usd`, `credits_consumed` | Metering |
-| `latency_ms` | End-to-end |
+| Event | Fields |
+|-------|--------|
+| `chat_graph_start` | `conversation_id` |
+| `graph_node` (one per node) | `node`, `outcome` (`ok`/`failure`), `duration_ms`, `error_code`/`error_type` on failure, plus node metrics: `retrieved`, `relevant`, `top_score`, `retrieval_latency_ms` (retrieve); `sources`, `prompt_chars` (build_context); `sufficient` (credit checks); `model`, `llm_latency_ms`, `input_tokens`, `output_tokens` (generate); `total_cost_usd`, `credits_consumed` (usage) |
+| `chat_graph_end` | `graph_path` (`a>b>c`), `status`, `outcome` (`success`/`rejected`/`failure`), retrieval and LLM metrics, tokens, cost, credits, `provider_request_id`, `latency_ms` |
 
 The retriever also logs `knowledge_search` (query-embedding tokens and latency). Output is `key=value`
 by default or JSON lines with `LOG_JSON=true`. **Never logged:** API keys, prompts, retrieved text,
@@ -289,9 +335,9 @@ User
  ↓
 FastAPI
  ↓
-LangGraph                         [NOT IMPLEMENTED; today RAGService (Step 4) orchestrates]
- ├── Context Manager              [NOT IMPLEMENTED]
- ├── Retriever                    [IMPLEMENTED, used by RAGService]
+LangGraph                         [IMPLEMENTED, Step 5: deterministic chat_graph]
+ ├── Context Manager              [NOT IMPLEMENTED: topic switching, summarisation, compression]
+ ├── Retriever                    [IMPLEMENTED, retrieve_knowledge node]
  │      ↓
  │    Qdrant                      [IMPLEMENTED]
  └── LLM                          [IMPLEMENTED]
@@ -320,9 +366,10 @@ Deployment: WAF → ALB → ECS/Fargate, RDS, managed Qdrant, Redis   [NOT IMPLE
 | Wikipedia ingestion CLI | IMPLEMENTED | `ingestion/` |
 | Retriever + dev search API/UI | IMPLEMENTED | |
 | RAG in `/chat` (grounded answers, sources, no-context handling) | IMPLEMENTED | Step 4 |
-| React sources + retrieval debug panel | IMPLEMENTED | Debug only with `RAG_DEBUG=true` |
+| React sources + debug panel (graph path, retrieval) | IMPLEMENTED | Debug only with `RAG_DEBUG=true` |
 | Conversation history / context management | NOT IMPLEMENTED | Topic switching, summarisation, compression |
-| LangGraph orchestration | NOT IMPLEMENTED | Topic switching, context compression, RAG |
+| LangGraph orchestration (`chat_graph`) | IMPLEMENTED | Step 5; deterministic, no checkpointer |
+| Topic detection / switching, summarisation, compression, long-term memory | NOT IMPLEMENTED | Future graph nodes |
 | Streaming (SSE/WebSocket) | NOT IMPLEMENTED | |
 | Redis | NOT IMPLEMENTED | Caching, rate limiting, distributed state |
 | AWS (ECS/Fargate, ALB, WAF, RDS) | NOT IMPLEMENTED | `infrastructure/` |

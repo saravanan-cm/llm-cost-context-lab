@@ -8,7 +8,7 @@ export interface ChatMessage {
   content: string;
   answerType?: AnswerType;
   sources?: Source[];
-  debug?: RetrievalDebug | null;
+  debug?: ChatDebug | null;
 }
 
 export interface ChatRequest {
@@ -48,10 +48,13 @@ export interface RetrievedChunkDebug {
   used: boolean;
 }
 
-export interface RetrievalDebug {
+export interface ChatDebug {
+  /** LangGraph nodes executed, in order. */
+  graph_path: string[];
   top_k: number;
   min_relevance_score: number | null;
   retrieval_latency_ms: number | null;
+  llm_latency_ms: number | null;
   query_tokens: number;
   chunks: RetrievedChunkDebug[];
 }
@@ -67,5 +70,5 @@ export interface ChatResponse {
   cost: CostBreakdown;
   credits: { consumed: DecimalString; remaining: DecimalString };
   /** Present only when the backend runs with RAG_DEBUG=true. */
-  debug: RetrievalDebug | null;
+  debug: ChatDebug | null;
 }

@@ -16,7 +16,7 @@ class Settings(BaseSettings):
     model_config = SettingsConfigDict(env_file=ENV_FILE, env_file_encoding="utf-8", extra="ignore")
 
     app_name: str = "LLM Cost & Context Lab"
-    app_version: str = "0.4.0"
+    app_version: str = "0.5.0"
     environment: Literal["local", "dev", "staging", "prod"] = "local"
     log_level: str = "INFO"
     log_json: bool = False

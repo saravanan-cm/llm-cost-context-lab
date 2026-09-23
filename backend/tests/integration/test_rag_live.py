@@ -46,6 +46,10 @@ def test_kafka_question_is_grounded_metered_and_charged(live_client):
     assert response.status_code == 200, response.text
     body = response.json()
     assert body["answer_type"] == "grounded"
+    assert body["debug"]["graph_path"] == [
+        "analyze_question", "precheck_credits", "retrieve_knowledge", "build_context",
+        "check_credits", "generate_answer", "usage_accounting",
+    ]
     assert body["sources"][0]["title"] == "Apache Kafka"
     assert body["usage"]["input_tokens"] > 500  # retrieved context is part of the input
     assert Decimal(body["cost"]["total_cost"]) > 0
@@ -60,6 +64,7 @@ def test_out_of_scope_question_is_handled_without_llm(live_client):
     ).json()
 
     assert body["answer_type"] == "no_context"
+    assert body["debug"]["graph_path"][-1] == "no_knowledge"
     assert body["model"] is None and body["sources"] == []
     assert body["credits"]["consumed"] == "0"
     assert all(not chunk["used"] for chunk in body["debug"]["chunks"])
