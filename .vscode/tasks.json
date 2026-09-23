@@ -1,0 +1,110 @@
+{
+  "version": "2.0.0",
+  "tasks": [
+    {
+      "label": "backend: dev",
+      "type": "shell",
+      "command": "${workspaceFolder}/backend/.venv/Scripts/python -m uvicorn app.main:app --reload",
+      "linux": {
+        "command": "${workspaceFolder}/backend/.venv/bin/python -m uvicorn app.main:app --reload"
+      },
+      "osx": {
+        "command": "${workspaceFolder}/backend/.venv/bin/python -m uvicorn app.main:app --reload"
+      },
+      "options": {
+        "cwd": "${workspaceFolder}/backend"
+      },
+      "isBackground": true,
+      "problemMatcher": []
+    },
+    {
+      "label": "backend: test",
+      "type": "shell",
+      "command": "${workspaceFolder}/backend/.venv/Scripts/python -m pytest",
+      "linux": {
+        "command": "${workspaceFolder}/backend/.venv/bin/python -m pytest"
+      },
+      "osx": {
+        "command": "${workspaceFolder}/backend/.venv/bin/python -m pytest"
+      },
+      "options": {
+        "cwd": "${workspaceFolder}/backend"
+      },
+      "group": "test",
+      "problemMatcher": []
+    },
+    {
+      "label": "frontend: dev",
+      "type": "shell",
+      "command": "npm run dev",
+      "options": {
+        "cwd": "${workspaceFolder}/frontend"
+      },
+      "isBackground": true,
+      "problemMatcher": []
+    },
+    {
+      "label": "dev: all",
+      "dependsOn": [
+        "backend: dev",
+        "frontend: dev"
+      ],
+      "problemMatcher": []
+    },
+    {
+      "label": "qdrant: up",
+      "type": "shell",
+      "command": "docker compose up -d qdrant",
+      "options": {
+        "cwd": "${workspaceFolder}"
+      },
+      "problemMatcher": []
+    },
+    {
+      "label": "ingestion: run",
+      "type": "shell",
+      "command": "${workspaceFolder}/backend/.venv/Scripts/python -m ingestion.ingest",
+      "linux": {
+        "command": "${workspaceFolder}/backend/.venv/bin/python -m ingestion.ingest"
+      },
+      "osx": {
+        "command": "${workspaceFolder}/backend/.venv/bin/python -m ingestion.ingest"
+      },
+      "options": {
+        "cwd": "${workspaceFolder}"
+      },
+      "problemMatcher": []
+    },
+    {
+      "label": "ingestion: dry run",
+      "type": "shell",
+      "command": "${workspaceFolder}/backend/.venv/Scripts/python -m ingestion.ingest --dry-run",
+      "linux": {
+        "command": "${workspaceFolder}/backend/.venv/bin/python -m ingestion.ingest --dry-run"
+      },
+      "osx": {
+        "command": "${workspaceFolder}/backend/.venv/bin/python -m ingestion.ingest --dry-run"
+      },
+      "options": {
+        "cwd": "${workspaceFolder}"
+      },
+      "problemMatcher": []
+    },
+    {
+      "label": "ingestion: test",
+      "type": "shell",
+      "command": "${workspaceFolder}/backend/.venv/Scripts/python -m pytest",
+      "linux": {
+        "command": "${workspaceFolder}/backend/.venv/bin/python -m pytest"
+      },
+      "osx": {
+        "command": "${workspaceFolder}/backend/.venv/bin/python -m pytest"
+      },
+      "options": {
+        "cwd": "${workspaceFolder}/ingestion"
+      },
+      "problemMatcher": [],
+      "group": "test"
+    }
+  ]
+}

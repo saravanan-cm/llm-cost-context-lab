@@ -1,0 +1,3 @@
+# Ingestion reuses the backend package (app.knowledge.*) for models, embeddings and the vector store.
+-e ../backend
+httpx>=0.27

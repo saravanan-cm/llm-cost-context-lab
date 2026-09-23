@@ -1,0 +1,17 @@
+# Knowledge domain: Software Engineering & Interview Preparation
+# One Wikipedia article title per line. Lines starting with # are ignored.
+# Use exact titles; ambiguous titles (e.g. "Python") resolve to disambiguation pages and are rejected.
+Python (programming language)
+FastAPI
+Apache Kafka
+Amazon Web Services
+Microservices
+Distributed computing
+Docker (software)
+Kubernetes
+Redis
+Database
+SQL
+NoSQL
+Large language model
+Retrieval-augmented generation
